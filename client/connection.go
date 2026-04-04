@@ -84,16 +84,18 @@ type Connection struct {
 	Registered     bool
 
 	// Config
-	Resolver        string
-	Domain          string
-	Encoding        QueryEncoding
-	UseRelay        bool
-	RelayURL        string
-	RelayAPIKey     string
-	RelayInsecure   bool
-	QueryDelay      time.Duration
-	SkipAutoTune    bool
-	ManualDelay     float64
+	Resolver             string
+	Domain               string
+	Encoding             QueryEncoding
+	UseRelay             bool
+	RelayURL             string
+	RelayAPIKey          string
+	RelayInsecure        bool
+	QueryDelay           time.Duration
+	SkipAutoTune         bool
+	ManualDelay          float64
+	LoadBalanceStrength  int
+	Pool                 *ResolverPool
 
 	// Stats
 	QueryCount    int
@@ -115,15 +117,38 @@ type Connection struct {
 
 // NewConnection creates a new connection manager.
 func NewConnection(id *identity.Identity, oraclePubKey [32]byte) *Connection {
+	pool := NewResolverPool(nil, 5)
+	pool.StartHealthCheck(60 * time.Second)
+
 	return &Connection{
-		Identity:        id,
-		OraclePublicKey: oraclePubKey,
-		State:           StateDisconnected,
-		Resolver:        "8.8.8.8",
-		Domain:          "cdn-static-eu.net",
-		Encoding:        EncodingProquint,
-		QueryDelay:      3 * time.Second,
-		ManualDelay:     3.0,
+		Identity:            id,
+		OraclePublicKey:     oraclePubKey,
+		State:               StateDisconnected,
+		Resolver:            "8.8.8.8",
+		Domain:              "cdn-static-eu.net",
+		Encoding:            EncodingProquint,
+		QueryDelay:          3 * time.Second,
+		ManualDelay:         3.0,
+		LoadBalanceStrength: 5,
+		Pool:                pool,
+	}
+}
+
+// NewConnectionWithResolvers creates a connection with custom resolver pool settings.
+func NewConnectionWithResolvers(id *identity.Identity, oraclePubKey [32]byte, resolvers []string, strength int) *Connection {
+	pool := NewResolverPool(resolvers, strength)
+	pool.StartHealthCheck(60 * time.Second)
+
+	c := NewConnection(id, oraclePubKey)
+	c.Pool = pool
+	c.LoadBalanceStrength = strength
+	return c
+}
+
+// Close stops background goroutines (health checker).
+func (c *Connection) Close() {
+	if c.Pool != nil {
+		c.Pool.StopHealthCheck()
 	}
 }
 
@@ -760,28 +785,64 @@ func (c *Connection) queryViaHTTP(frame []byte) ([]byte, error) {
 	return body, nil
 }
 
-// dnsQueryAAAA sends a raw DNS AAAA query and returns the IPv6 records.
+// dnsQueryAAAA sends a raw DNS AAAA query using the resolver pool for load
+// balancing. On failure, the resolver is marked unhealthy and the next one
+// is tried.
 func (c *Connection) dnsQueryAAAA(name string) ([][]byte, error) {
 	query := buildDNSQuery(name)
 
-	conn, err := net.DialTimeout("udp", c.Resolver+":53", 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("DNS dial: %w", err)
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-
-	if _, err := conn.Write(query); err != nil {
-		return nil, fmt.Errorf("DNS write: %w", err)
+	maxAttempts := 3
+	if c.Pool != nil && c.Pool.HealthyCount() > 3 {
+		maxAttempts = c.Pool.HealthyCount()
 	}
 
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, fmt.Errorf("DNS read: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		resolver := c.Resolver
+		if c.Pool != nil {
+			resolver = c.Pool.Next()
+		}
+
+		addr := resolver + ":53"
+		conn, err := net.DialTimeout("udp", addr, 10*time.Second)
+		if err != nil {
+			lastErr = fmt.Errorf("DNS dial %s: %w", resolver, err)
+			if c.Pool != nil {
+				c.Pool.MarkUnhealthy(resolver)
+			}
+			continue
+		}
+
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		if _, err := conn.Write(query); err != nil {
+			conn.Close()
+			lastErr = fmt.Errorf("DNS write %s: %w", resolver, err)
+			if c.Pool != nil {
+				c.Pool.MarkUnhealthy(resolver)
+			}
+			continue
+		}
+
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		conn.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("DNS read %s: %w", resolver, err)
+			if c.Pool != nil {
+				c.Pool.MarkUnhealthy(resolver)
+			}
+			continue
+		}
+
+		records, err := parseAAAAResponse(buf[:n])
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return records, nil
 	}
 
-	return parseAAAAResponse(buf[:n])
+	return nil, fmt.Errorf("all resolvers failed: %w", lastErr)
 }
 
 // buildDNSQuery builds a raw DNS AAAA query packet.
