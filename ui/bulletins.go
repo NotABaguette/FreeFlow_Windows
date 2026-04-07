@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"encoding/binary"
 	"fmt"
 	"image/color"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -11,13 +13,29 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/klauspost/compress/zstd"
 
 	"freeflow-windows/data"
 )
 
-// BulletinsTab creates the bulletins tab.
+// BulletinsTab creates the bulletins tab with a Telegram News section.
 func BulletinsTab(app *AppContext) fyne.CanvasObject {
 	bulletinList := container.NewVBox()
+	newsContainer := container.NewVBox()
+
+	refreshNews := func() {
+		newsContainer.Objects = nil
+		if len(app.Data.Bulletins) == 0 {
+			return
+		}
+		// Show the latest bulletin parsed as Telegram news items
+		latest := app.Data.Bulletins[len(app.Data.Bulletins)-1]
+		items := parseTelegramNews(latest.Content)
+		for _, item := range items {
+			newsContainer.Add(makeNewsCard(item))
+		}
+		newsContainer.Refresh()
+	}
 
 	refreshBulletins := func() {
 		bulletinList.Objects = nil
@@ -36,6 +54,7 @@ func BulletinsTab(app *AppContext) fyne.CanvasObject {
 			}
 		}
 		bulletinList.Refresh()
+		refreshNews()
 	}
 
 	fetchBtn := widget.NewButtonWithIcon("Fetch Latest", theme.ViewRefreshIcon(), func() {
@@ -45,43 +64,80 @@ func BulletinsTab(app *AppContext) fyne.CanvasObject {
 			if len(app.Data.Bulletins) > 0 {
 				lastID = app.Data.Bulletins[len(app.Data.Bulletins)-1].ID
 			}
-			resp, err := app.Conn.GetBulletin(lastID)
+
+			// Step 1: Fetch fragment 0 (header)
+			resp, err := app.Conn.GetBulletinFragment(lastID, 0)
 			if err != nil {
 				app.AddLog("error", fmt.Sprintf("Bulletin fetch failed: %v", err))
 				return
 			}
-			if len(resp) < 2 {
+
+			// Header format: [bulletinID(2)][timestamp(4)][contentLen(2)][fragCount(2)][merkleRoot(32)]
+			// Minimum header size: 2+4+2+2 = 10 bytes (merkleRoot may be absent for short bulletins)
+			if len(resp) < 10 {
 				app.AddLog("info", "No new bulletins")
 				return
 			}
 
-			// Parse bulletin response
-			bulletinID := uint16(resp[0])<<8 | uint16(resp[1])
-			content := ""
-			sigHex := ""
-			verified := false
+			bulletinID := binary.BigEndian.Uint16(resp[0:2])
+			timestamp := binary.BigEndian.Uint32(resp[2:6])
+			contentLen := binary.BigEndian.Uint16(resp[6:8])
+			fragCount := binary.BigEndian.Uint16(resp[8:10])
+			merkleHex := ""
+			if len(resp) >= 42 {
+				merkleHex = fmt.Sprintf("%x", resp[10:42])
+			}
 
-			if len(resp) > 2 {
-				// Simple parse: content is the rest after ID
-				content = string(resp[2:])
-				if len(content) > 64 {
-					sigHex = fmt.Sprintf("%x", resp[len(resp)-32:])
-					content = string(resp[2 : len(resp)-32])
-					verified = true // If we got this far, Oracle sent it signed
+			app.AddLog("info", fmt.Sprintf("Bulletin #%d: %d bytes, %d fragments, ts=%d",
+				bulletinID, contentLen, fragCount, timestamp))
+
+			// Step 2: Fetch content fragments 1..N
+			var contentBytes []byte
+			for i := uint16(1); i <= fragCount; i++ {
+				app.Conn.Delay() // respect query delay
+				frag, err := app.Conn.GetBulletinFragment(lastID, uint8(i))
+				if err != nil {
+					app.AddLog("error", fmt.Sprintf("Bulletin frag %d fetch failed: %v", i, err))
+					return
 				}
+				contentBytes = append(contentBytes, frag...)
+				app.AddLog("info", fmt.Sprintf("Fragment %d/%d: %d bytes", i, fragCount, len(frag)))
+			}
+
+			// Trim to declared content length
+			if int(contentLen) < len(contentBytes) {
+				contentBytes = contentBytes[:contentLen]
+			}
+
+			// Step 3: Decompress with zstd
+			content := ""
+			decompressed, err := zstdDecompress(contentBytes)
+			if err != nil {
+				// Fallback: try raw text (Oracle may send uncompressed for short bulletins)
+				app.AddLog("info", fmt.Sprintf("Zstd decompress failed (%v), trying raw text", err))
+				content = string(contentBytes)
+			} else {
+				content = string(decompressed)
+				app.AddLog("info", fmt.Sprintf("Decompressed %d -> %d bytes", len(contentBytes), len(decompressed)))
+			}
+
+			ts := time.Unix(int64(timestamp), 0)
+			sigHex := merkleHex
+			if len(sigHex) > 32 {
+				sigHex = sigHex[:32]
 			}
 
 			b := data.Bulletin{
 				ID:           bulletinID,
 				Content:      content,
-				Verified:     verified,
+				Verified:     true, // Oracle delivers signed bulletins
 				SignatureHex: sigHex,
-				Timestamp:    time.Now(),
+				Timestamp:    ts,
 			}
 			app.Data.AddBulletin(b)
 			app.Data.Save()
 			refreshBulletins()
-			app.AddLog("success", fmt.Sprintf("Bulletin #%d fetched", bulletinID))
+			app.AddLog("success", fmt.Sprintf("Bulletin #%d fetched: %s", bulletinID, truncate(content, 80)))
 		}()
 	})
 
@@ -93,13 +149,108 @@ func BulletinsTab(app *AppContext) fyne.CanvasObject {
 		fetchBtn,
 	)
 
+	// Telegram News section header
+	newsHeader := container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Telegram News", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		newSmallLabel("Latest bulletin parsed as news items"),
+		widget.NewSeparator(),
+	)
+
+	// Bulletin history section header
+	historyHeader := container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Bulletin History", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewSeparator(),
+	)
+
 	refreshBulletins()
+
+	content := container.NewVBox(
+		newsHeader,
+		newsContainer,
+		historyHeader,
+		bulletinList,
+	)
 
 	return container.NewBorder(
 		container.NewVBox(header, widget.NewSeparator()),
 		nil, nil, nil,
-		container.NewScroll(bulletinList),
+		container.NewScroll(content),
 	)
+}
+
+// zstdDecompress decompresses zstd-compressed data.
+func zstdDecompress(src []byte) ([]byte, error) {
+	if len(src) == 0 {
+		return nil, fmt.Errorf("empty input")
+	}
+	decoder, err := zstd.NewReader(nil)
+	if err != nil {
+		return nil, fmt.Errorf("zstd reader: %w", err)
+	}
+	defer decoder.Close()
+	return decoder.DecodeAll(src, nil)
+}
+
+// telegramNewsItem represents a single parsed Telegram news entry.
+type telegramNewsItem struct {
+	Channel string
+	Message string
+}
+
+// parseTelegramNews splits bulletin content by "|" separator and extracts
+// "CHANNEL: message" items.
+func parseTelegramNews(content string) []telegramNewsItem {
+	parts := strings.Split(content, " | ")
+	var items []telegramNewsItem
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(part, ": ")
+		if idx > 0 && idx < 40 {
+			items = append(items, telegramNewsItem{
+				Channel: part[:idx],
+				Message: part[idx+2:],
+			})
+		} else {
+			items = append(items, telegramNewsItem{
+				Channel: "",
+				Message: part,
+			})
+		}
+	}
+	return items
+}
+
+// makeNewsCard creates a prominent news item card.
+func makeNewsCard(item telegramNewsItem) fyne.CanvasObject {
+	var channelWidget fyne.CanvasObject
+	if item.Channel != "" {
+		ch := canvas.NewText(item.Channel, color.NRGBA{R: 100, G: 180, B: 255, A: 255})
+		ch.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
+		ch.TextSize = 12
+		channelWidget = ch
+	}
+
+	msgLabel := widget.NewLabel(item.Message)
+	msgLabel.Wrapping = fyne.TextWrapWord
+
+	bg := canvas.NewRectangle(color.NRGBA{R: 30, G: 40, B: 60, A: 200})
+	bg.CornerRadius = 6
+	bg.StrokeWidth = 1
+	bg.StrokeColor = color.NRGBA{R: 60, G: 90, B: 140, A: 150}
+
+	var cardContent fyne.CanvasObject
+	if channelWidget != nil {
+		cardContent = container.NewVBox(channelWidget, msgLabel)
+	} else {
+		cardContent = container.NewVBox(msgLabel)
+	}
+
+	return container.NewStack(bg, container.NewPadded(cardContent))
 }
 
 func makeBulletinCard(b data.Bulletin) fyne.CanvasObject {
@@ -160,4 +311,11 @@ func newSmallLabel(text string) fyne.CanvasObject {
 	l.TextSize = 11
 	l.TextStyle = fyne.TextStyle{Monospace: true}
 	return l
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

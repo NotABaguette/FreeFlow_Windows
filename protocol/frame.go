@@ -58,10 +58,19 @@ func BuildRegisterFrame(seqNo uint8, token [4]byte, pubkey [32]byte) []byte {
 	return BuildFrame(CmdREGISTER, seqNo, 0, 1, token, pubkey[:])
 }
 
-// BuildGetBulletinFrame creates a GET_BULLETIN frame.
+// BuildGetBulletinFrame creates a GET_BULLETIN frame for fragment 0 (header).
 func BuildGetBulletinFrame(lastSeenID uint16) []byte {
 	data := []byte{byte(lastSeenID >> 8), byte(lastSeenID & 0xFF)}
 	return BuildFrame(CmdGET_BULLETIN, 0, 0, 1, [4]byte{}, data)
+}
+
+// BuildGetBulletinFragmentFrame creates a GET_BULLETIN frame requesting a specific fragment.
+// Data: [lastSeenID(2)][fragIndex(1)]
+func BuildGetBulletinFragmentFrame(lastSeenID uint16, fragIndex uint8) []byte {
+	data := []byte{byte(lastSeenID >> 8), byte(lastSeenID & 0xFF), fragIndex}
+	// Pad to even length for proquint (header=8 + data=3 = 11, need 12)
+	data = append(data, 0x00)
+	return BuildFrame(CmdGET_BULLETIN, 0, fragIndex, 1, [4]byte{}, data)
 }
 
 // BuildDiscoverFrame creates a DISCOVER frame.

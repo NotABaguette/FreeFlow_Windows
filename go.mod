@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	fyne.io/fyne/v2 v2.4.4
+	github.com/klauspost/compress v1.17.7
 	golang.org/x/crypto v0.21.0
 )
 

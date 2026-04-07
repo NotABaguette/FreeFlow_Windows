@@ -196,6 +196,12 @@ func (c *Connection) delay() {
 	}
 }
 
+// Delay waits the configured inter-query delay. Exported for use in multi-step
+// operations like bulletin fragment fetching.
+func (c *Connection) Delay() {
+	c.delay()
+}
+
 func (c *Connection) transport() string {
 	if c.UseRelay {
 		return "HTTP"
@@ -573,7 +579,7 @@ func (c *Connection) PollMessages(contacts *identity.ContactStore) (string, *ide
 	return text, senderContact, nil
 }
 
-// GetBulletin fetches a signed bulletin from the Oracle.
+// GetBulletin fetches a signed bulletin from the Oracle (fragment 0 / header).
 func (c *Connection) GetBulletin(lastSeenID uint16) ([]byte, error) {
 	frame := protocol.BuildGetBulletinFrame(lastSeenID)
 	c.addQueryLog(c.transport(), fmt.Sprintf("GET_BULLETIN lastID=%d", lastSeenID), "sending...")
@@ -587,6 +593,24 @@ func (c *Connection) GetBulletin(lastSeenID uint16) ([]byte, error) {
 	}
 
 	c.addQueryLog(c.transport(), "GET_BULLETIN", fmt.Sprintf("response=%dB", len(resp)))
+	return resp, nil
+}
+
+// GetBulletinFragment fetches a specific fragment of a bulletin.
+// fragIndex=0 returns the header, fragIndex=1..N returns content chunks.
+func (c *Connection) GetBulletinFragment(lastSeenID uint16, fragIndex uint8) ([]byte, error) {
+	frame := protocol.BuildGetBulletinFragmentFrame(lastSeenID, fragIndex)
+	c.addQueryLog(c.transport(), fmt.Sprintf("GET_BULLETIN lastID=%d frag=%d", lastSeenID, fragIndex), "sending...")
+
+	resp, err := c.queryOracle(frame)
+	if err != nil {
+		return nil, fmt.Errorf("GET_BULLETIN frag %d: %w", fragIndex, err)
+	}
+	if err := protocol.CheckErrorResponse(resp); err != nil {
+		return nil, err
+	}
+
+	c.addQueryLog(c.transport(), fmt.Sprintf("GET_BULLETIN frag=%d", fragIndex), fmt.Sprintf("response=%dB", len(resp)))
 	return resp, nil
 }
 
