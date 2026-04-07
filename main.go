@@ -17,7 +17,7 @@ import (
 
 func main() {
 	a := app.NewWithID("io.freeflow.windows")
-	a.Settings().SetTheme(theme.DarkTheme())
+	a.Settings().SetTheme(&ui.UnicodeTheme{})
 
 	w := a.NewWindow("FreeFlow")
 	w.Resize(fyne.NewSize(1100, 750))
