@@ -1,10 +1,9 @@
 package client
 
 import (
+	"crypto/rand"
 	"log"
 	"net"
-	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -176,7 +175,9 @@ func (p *ResolverPool) checkAll() {
 	log.Printf("[RESOLVER_POOL] Health check complete: %d/%d healthy", p.HealthyCount(), len(resolvers))
 }
 
-// probe uses ICMP ping to test if a resolver is reachable.
+// probe tests resolver reachability by sending a minimal DNS query over UDP.
+// This conforms to the DNS protocol (no ICMP) and avoids spawning visible
+// CMD windows on Windows.
 func (p *ResolverPool) probe(resolver string) bool {
 	host := resolver
 	if h, _, err := net.SplitHostPort(resolver); err == nil {
@@ -184,14 +185,42 @@ func (p *ResolverPool) probe(resolver string) bool {
 	}
 	host = strings.TrimSpace(host)
 
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("ping", "-n", "1", "-w", "3000", host)
-	default:
-		cmd = exec.Command("ping", "-c", "1", "-W", "3", host)
+	addr := net.JoinHostPort(host, "53")
+	conn, err := net.DialTimeout("udp", addr, 3*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	query := buildDNSProbe()
+	if _, err := conn.Write(query); err != nil {
+		return false
 	}
 
-	err := cmd.Run()
-	return err == nil
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	return err == nil && n >= 12
+}
+
+// buildDNSProbe builds a minimal DNS A query for "dns.google" to check
+// if a resolver is responding. Uses a random transaction ID.
+func buildDNSProbe() []byte {
+	var txid [2]byte
+	rand.Read(txid[:])
+
+	var pkt []byte
+	pkt = append(pkt, txid[0], txid[1])
+	pkt = append(pkt, 0x01, 0x00) // flags: recursion desired
+	pkt = append(pkt, 0x00, 0x01) // questions: 1
+	pkt = append(pkt, 0, 0, 0, 0, 0, 0)
+	// dns.google
+	pkt = append(pkt, 3)
+	pkt = append(pkt, []byte("dns")...)
+	pkt = append(pkt, 6)
+	pkt = append(pkt, []byte("google")...)
+	pkt = append(pkt, 0)
+	pkt = append(pkt, 0x00, 0x01) // A record
+	pkt = append(pkt, 0x00, 0x01) // IN class
+	return pkt
 }
