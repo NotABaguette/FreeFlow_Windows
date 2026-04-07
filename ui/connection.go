@@ -55,6 +55,7 @@ func ConnectionTab(app *AppContext) fyne.CanvasObject {
 			statusLabel.SetText("Disconnected")
 		}
 		statusDot.Refresh()
+		statusLabel.Refresh()
 
 		if app.Conn.UseRelay {
 			transportLabel.Text = "HTTP Relay"
