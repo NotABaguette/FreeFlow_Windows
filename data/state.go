@@ -61,6 +61,7 @@ type Settings struct {
 	ManualDelay          float64 `json:"manual_delay"`
 	LoadBalanceStrength  int     `json:"load_balance_strength"`
 	CustomResolvers      string  `json:"custom_resolvers"`
+	DisableLB            bool    `json:"disable_lb"`
 }
 
 // DefaultSettings returns sensible defaults.

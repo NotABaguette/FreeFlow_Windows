@@ -69,6 +69,11 @@ func main() {
 		conn.QueryDelay = time.Duration(appData.Settings.QueryDelay * float64(time.Second))
 	}
 
+	// Apply load balancing settings
+	if appData.Settings.DisableLB {
+		conn.Pool.SetDisabled(true, appData.Settings.Resolver)
+	}
+
 	// Build app context
 	appCtx := &ui.AppContext{
 		Window:   w,

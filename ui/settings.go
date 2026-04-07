@@ -229,7 +229,16 @@ func transportPanel(app *AppContext) fyne.CanvasObject {
 	resolverListNote.TextSize = 11
 	resolverListNote.TextStyle = fyne.TextStyle{Monospace: true}
 
-	applyResolversBtn := widget.NewButtonWithIcon("Apply Resolvers", theme.ViewRefreshIcon(), func() {
+	// Disable load balancing toggle
+	disableLBCheck := widget.NewCheck("Disable Load Balancing (use single resolver above)", func(b bool) {
+		app.Data.Settings.DisableLB = b
+		if app.Conn.Pool != nil {
+			app.Conn.Pool.SetDisabled(b, app.Data.Settings.Resolver)
+		}
+	})
+	disableLBCheck.Checked = app.Data.Settings.DisableLB
+
+	applyResolversBtn := widget.NewButtonWithIcon("Apply & Probe Resolvers", theme.ViewRefreshIcon(), func() {
 		lines := strings.Split(resolverListEntry.Text, "\n")
 		var resolvers []string
 		for _, l := range lines {
@@ -244,8 +253,14 @@ func transportPanel(app *AppContext) fyne.CanvasObject {
 				app.Conn.Pool.StopHealthCheck()
 			}
 			app.Conn.Pool = client.NewResolverPool(resolvers, app.Data.Settings.LoadBalanceStrength)
-			app.Conn.Pool.StartHealthCheck(60 * time.Second)
-			app.AddLog("success", fmt.Sprintf("Resolver pool updated: %d resolvers", len(resolvers)))
+			app.Conn.Pool.SetDisabled(app.Data.Settings.DisableLB, app.Data.Settings.Resolver)
+			// Probe all resolvers immediately
+			go func() {
+				app.AddLog("info", "Probing resolvers...")
+				app.Conn.Pool.ProbeAll()
+				app.Conn.Pool.StartHealthCheck(60 * time.Second)
+				app.AddLog("success", fmt.Sprintf("Resolver pool ready: %d/%d healthy", app.Conn.Pool.HealthyCount(), len(resolvers)))
+			}()
 		}
 	})
 
@@ -293,7 +308,8 @@ func transportPanel(app *AppContext) fyne.CanvasObject {
 		widget.NewLabelWithStyle("Primary DNS Resolver (fallback):", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true}),
 		resolverEntry,
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle("Load Balancing Resolvers:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewLabelWithStyle("Load Balancing:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		disableLBCheck,
 		resolverListNote,
 		resolverListEntry,
 		container.NewHBox(applyResolversBtn, layout.NewSpacer()),

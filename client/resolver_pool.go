@@ -39,6 +39,8 @@ type ResolverPool struct {
 	queryCount int             // queries since last rotation
 	strength   int             // 1-10, rotate every (11-strength) queries
 	stopHealth chan struct{}
+	Disabled   bool            // if true, bypass pool and use SingleResolver
+	SingleResolver string     // resolver to use when Disabled=true
 }
 
 // NewResolverPool creates a resolver pool. If resolvers is empty, the
@@ -68,10 +70,16 @@ func NewResolverPool(resolvers []string, strength int) *ResolverPool {
 }
 
 // Next returns the next healthy resolver according to the round-robin
-// schedule. If no healthy resolvers remain, all are reset to healthy.
+// schedule. If disabled, returns SingleResolver. If no healthy resolvers
+// remain, all are reset to healthy.
 func (p *ResolverPool) Next() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Load balancing disabled — use single resolver
+	if p.Disabled && p.SingleResolver != "" {
+		return p.SingleResolver
+	}
 
 	rotateEvery := 11 - p.strength
 	p.queryCount++
@@ -90,12 +98,33 @@ func (p *ResolverPool) Next() string {
 		}
 	}
 
-	// No healthy resolvers — reset all
+	// No healthy resolvers — reset all and return first
 	log.Printf("[RESOLVER_POOL] No healthy resolvers, resetting all to healthy")
 	for _, r := range p.resolvers {
 		p.healthy[r] = true
 	}
 	return p.resolvers[p.index]
+}
+
+// ProbeAll tests all resolvers immediately and updates health status.
+// Call this on startup to establish which resolvers are actually working.
+func (p *ResolverPool) ProbeAll() {
+	log.Printf("[RESOLVER_POOL] Initial probe of %d resolvers...", len(p.resolvers))
+	p.checkAll()
+	log.Printf("[RESOLVER_POOL] Initial probe done: %d/%d healthy", p.HealthyCount(), len(p.resolvers))
+}
+
+// SetDisabled enables or disables load balancing.
+func (p *ResolverPool) SetDisabled(disabled bool, singleResolver string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Disabled = disabled
+	p.SingleResolver = singleResolver
+	if disabled {
+		log.Printf("[RESOLVER_POOL] Load balancing DISABLED, using single resolver: %s", singleResolver)
+	} else {
+		log.Printf("[RESOLVER_POOL] Load balancing ENABLED, pool of %d resolvers", len(p.resolvers))
+	}
 }
 
 // MarkUnhealthy marks a resolver as down.
@@ -136,6 +165,9 @@ func (p *ResolverPool) SetStrength(s int) {
 // all resolvers by sending a DNS AAAA query for "google.com".
 func (p *ResolverPool) StartHealthCheck(interval time.Duration) {
 	go func() {
+		// Probe all resolvers immediately on startup
+		p.checkAll()
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
