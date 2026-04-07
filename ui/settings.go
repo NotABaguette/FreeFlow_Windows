@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image/color"
+	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -203,13 +205,49 @@ func transportPanel(app *AppContext) fyne.CanvasObject {
 		encodingSelect.SetSelected("Proquint (censored networks)")
 	}
 
-	// Resolver
+	// Primary Resolver (fallback)
 	resolverEntry := widget.NewEntry()
 	resolverEntry.SetText(app.Data.Settings.Resolver)
 	resolverEntry.OnChanged = func(s string) {
 		app.Conn.Resolver = s
 		app.Data.Settings.Resolver = s
 	}
+
+	// Load Balancing Resolvers
+	defaultResolverText := strings.Join(client.DefaultResolvers, "\n")
+	customResolvers := app.Data.Settings.CustomResolvers
+	if customResolvers == "" {
+		customResolvers = defaultResolverText
+	}
+	resolverListEntry := widget.NewMultiLineEntry()
+	resolverListEntry.SetText(customResolvers)
+	resolverListEntry.SetMinRowsVisible(6)
+	resolverListEntry.Wrapping = fyne.TextWrapOff
+	resolverListEntry.SetPlaceHolder("One resolver per line, e.g.:\n8.8.8.8\n1.1.1.1\n9.9.9.9")
+
+	resolverListNote := canvas.NewText("Load balancer rotates across these resolvers. One per line (port 53 assumed).", color.NRGBA{R: 128, G: 128, B: 128, A: 200})
+	resolverListNote.TextSize = 11
+	resolverListNote.TextStyle = fyne.TextStyle{Monospace: true}
+
+	applyResolversBtn := widget.NewButtonWithIcon("Apply Resolvers", theme.ViewRefreshIcon(), func() {
+		lines := strings.Split(resolverListEntry.Text, "\n")
+		var resolvers []string
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l != "" {
+				resolvers = append(resolvers, l)
+			}
+		}
+		if len(resolvers) > 0 {
+			app.Data.Settings.CustomResolvers = resolverListEntry.Text
+			if app.Conn.Pool != nil {
+				app.Conn.Pool.StopHealthCheck()
+			}
+			app.Conn.Pool = client.NewResolverPool(resolvers, app.Data.Settings.LoadBalanceStrength)
+			app.Conn.Pool.StartHealthCheck(60 * time.Second)
+			app.AddLog("success", fmt.Sprintf("Resolver pool updated: %d resolvers", len(resolvers)))
+		}
+	})
 
 	// HTTP Relay toggle
 	relayCheck := widget.NewCheck("Use HTTP Relay", func(b bool) {
@@ -252,8 +290,13 @@ func transportPanel(app *AppContext) fyne.CanvasObject {
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Transport Configuration", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle("DNS Resolver:", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true}),
+		widget.NewLabelWithStyle("Primary DNS Resolver (fallback):", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true}),
 		resolverEntry,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Load Balancing Resolvers:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		resolverListNote,
+		resolverListEntry,
+		container.NewHBox(applyResolversBtn, layout.NewSpacer()),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("DNS Encoding:", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true}),
 		encodingSelect,

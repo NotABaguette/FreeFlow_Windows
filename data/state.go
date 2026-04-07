@@ -60,6 +60,7 @@ type Settings struct {
 	SkipAutoTune         bool    `json:"skip_auto_tune"`
 	ManualDelay          float64 `json:"manual_delay"`
 	LoadBalanceStrength  int     `json:"load_balance_strength"`
+	CustomResolvers      string  `json:"custom_resolvers"`
 }
 
 // DefaultSettings returns sensible defaults.
