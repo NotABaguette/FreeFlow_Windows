@@ -55,20 +55,22 @@ type Settings struct {
 	RelayURL        string  `json:"relay_url"`
 	RelayAPIKey     string  `json:"relay_api_key"`
 	RelayInsecure   bool    `json:"relay_insecure"`
-	DevMode         bool    `json:"dev_mode"`
-	QueryDelay      float64 `json:"query_delay"`
-	SkipAutoTune    bool    `json:"skip_auto_tune"`
-	ManualDelay     float64 `json:"manual_delay"`
+	DevMode              bool    `json:"dev_mode"`
+	QueryDelay           float64 `json:"query_delay"`
+	SkipAutoTune         bool    `json:"skip_auto_tune"`
+	ManualDelay          float64 `json:"manual_delay"`
+	LoadBalanceStrength  int     `json:"load_balance_strength"`
 }
 
 // DefaultSettings returns sensible defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		OracleDomain:  "cdn-static-eu.net",
-		Resolver:      "8.8.8.8",
-		QueryEncoding: "proquint",
-		QueryDelay:    3.0,
-		ManualDelay:   3.0,
+		OracleDomain:        "cdn-static-eu.net",
+		Resolver:            "8.8.8.8",
+		QueryEncoding:       "proquint",
+		QueryDelay:          0.1,
+		ManualDelay:         0.1,
+		LoadBalanceStrength: 5,
 	}
 }
 

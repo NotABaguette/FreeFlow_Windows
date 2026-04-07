@@ -127,8 +127,8 @@ func NewConnection(id *identity.Identity, oraclePubKey [32]byte) *Connection {
 		Resolver:            "8.8.8.8",
 		Domain:              "cdn-static-eu.net",
 		Encoding:            EncodingProquint,
-		QueryDelay:          3 * time.Second,
-		ManualDelay:         3.0,
+		QueryDelay:          100 * time.Millisecond,
+		ManualDelay:         0.1,
 		LoadBalanceStrength: 5,
 		Pool:                pool,
 	}
@@ -186,6 +186,11 @@ func (c *Connection) setState(s ConnectionState) {
 	if c.OnStateChange != nil {
 		c.OnStateChange(s)
 	}
+}
+
+// DurationFromSeconds converts a float64 seconds value to time.Duration.
+func DurationFromSeconds(s float64) time.Duration {
+	return time.Duration(s * float64(time.Second))
 }
 
 func (c *Connection) delay() {

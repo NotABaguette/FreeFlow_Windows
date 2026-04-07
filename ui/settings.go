@@ -311,7 +311,7 @@ func securityPanel(app *AppContext) fyne.CanvasObject {
 func advancedPanel(app *AppContext) fyne.CanvasObject {
 	// Query delay
 	delayEntry := widget.NewEntry()
-	delayEntry.SetText(fmt.Sprintf("%.1f", app.Data.Settings.QueryDelay))
+	delayEntry.SetText(fmt.Sprintf("%.3f", app.Data.Settings.QueryDelay))
 	delayEntry.OnChanged = func(s string) {
 		var d float64
 		fmt.Sscanf(s, "%f", &d)
@@ -319,6 +319,52 @@ func advancedPanel(app *AppContext) fyne.CanvasObject {
 			app.Data.Settings.QueryDelay = d
 		}
 	}
+
+	delayNote := canvas.NewText("Default: 0.1 sec (100ms). Lower = faster but more detectable.", color.NRGBA{R: 128, G: 128, B: 128, A: 200})
+	delayNote.TextSize = 11
+	delayNote.TextStyle = fyne.TextStyle{Monospace: true}
+
+	// Load balance strength
+	strengthSelect := widget.NewSelect(
+		[]string{"1 (Rotate every 10 queries)", "2", "3", "4", "5 (Balanced)", "6", "7", "8", "9", "10 (Rotate every query)"},
+		func(s string) {
+			var val int
+			fmt.Sscanf(s, "%d", &val)
+			if val >= 1 && val <= 10 {
+				app.Data.Settings.LoadBalanceStrength = val
+				if app.Conn.Pool != nil {
+					app.Conn.Pool.SetStrength(val)
+				}
+			}
+		},
+	)
+	currentStrength := app.Data.Settings.LoadBalanceStrength
+	if currentStrength == 0 {
+		currentStrength = 5
+	}
+	switch currentStrength {
+	case 1:
+		strengthSelect.SetSelected("1 (Rotate every 10 queries)")
+	case 5:
+		strengthSelect.SetSelected("5 (Balanced)")
+	case 10:
+		strengthSelect.SetSelected("10 (Rotate every query)")
+	default:
+		strengthSelect.SetSelected(fmt.Sprintf("%d", currentStrength))
+	}
+
+	strengthNote := canvas.NewText("Higher = more resolver rotation (harder to detect, but uses more resolvers).", color.NRGBA{R: 128, G: 128, B: 128, A: 200})
+	strengthNote.TextSize = 11
+	strengthNote.TextStyle = fyne.TextStyle{Monospace: true}
+
+	// Healthy resolvers count
+	healthyCount := 0
+	totalCount := 0
+	if app.Conn.Pool != nil {
+		healthyCount = app.Conn.Pool.HealthyCount()
+		totalCount = len(client.DefaultResolvers)
+	}
+	healthyLabel := makeSettingsRow("Healthy Resolvers", fmt.Sprintf("%d / %d", healthyCount, totalCount))
 
 	// Dev mode
 	devCheck := widget.NewCheck("Dev Mode (log all queries)", func(b bool) {
@@ -331,15 +377,31 @@ func advancedPanel(app *AppContext) fyne.CanvasObject {
 	devNote.TextSize = 11
 	devNote.TextStyle = fyne.TextStyle{Monospace: true}
 
-	saveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+	saveBtn := widget.NewButtonWithIcon("Save & Apply", theme.DocumentSaveIcon(), func() {
 		app.Data.Save()
-		app.AddLog("info", "Settings saved")
+		// Apply delay
+		var d float64
+		fmt.Sscanf(delayEntry.Text, "%f", &d)
+		if d > 0 {
+			app.Conn.ManualDelay = d
+			app.Conn.QueryDelay = client.DurationFromSeconds(d)
+		}
+		app.AddLog("info", fmt.Sprintf("Settings saved. Delay=%.3fs, LB Strength=%d", d, app.Data.Settings.LoadBalanceStrength))
 	})
+	saveBtn.Importance = widget.HighImportance
 
 	content := container.NewVBox(
-		widget.NewLabelWithStyle("Rate Limiting", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewLabelWithStyle("Query Timing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
 		widget.NewSeparator(),
 		container.NewBorder(nil, nil, widget.NewLabel("Query interval (sec):"), nil, delayEntry),
+		delayNote,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Load Balancing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Rotation Strength:", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true}),
+		strengthSelect,
+		strengthNote,
+		healthyLabel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Developer", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
 		widget.NewSeparator(),
