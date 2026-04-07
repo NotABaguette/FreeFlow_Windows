@@ -141,10 +141,44 @@ func BulletinsTab(app *AppContext) fyne.CanvasObject {
 		}()
 	})
 
+	// Speed-based suggestion
+	speedSuggestion := canvas.NewText("", color.NRGBA{R: 128, G: 200, B: 255, A: 255})
+	speedSuggestion.TextSize = 11
+	speedSuggestion.TextStyle = fyne.TextStyle{Monospace: true}
+	if app.Conn.PingLatency > 0 {
+		ms := app.Conn.PingLatency.Milliseconds()
+		var suggested int
+		var eta string
+		switch {
+		case ms < 200:
+			suggested = 30
+			eta = "~30s"
+		case ms < 500:
+			suggested = 15
+			eta = "~1 min"
+		case ms < 1000:
+			suggested = 10
+			eta = "~2 min"
+		case ms < 3000:
+			suggested = 5
+			eta = "~3 min"
+		case ms < 5000:
+			suggested = 3
+			eta = "~5 min"
+		default:
+			suggested = 1
+			eta = "~3 min"
+		}
+		speedSuggestion.Text = fmt.Sprintf("Speed: %dms/query — suggested: %d messages (ETA: %s)", ms, suggested, eta)
+	} else {
+		speedSuggestion.Text = "Ping first to get speed-based recommendation"
+	}
+
 	header := container.NewBorder(nil, nil,
 		container.NewVBox(
 			widget.NewLabelWithStyle("Bulletins", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true}),
 			newSmallLabel("Ed25519-signed broadcasts from the Oracle"),
+			speedSuggestion,
 		),
 		fetchBtn,
 	)
