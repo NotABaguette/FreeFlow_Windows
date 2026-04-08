@@ -116,9 +116,12 @@ type Connection struct {
 }
 
 // NewConnection creates a new connection manager.
+// Load balancing is DISABLED by default — uses single Resolver.
+// Enable via Pool.SetDisabled(false, "") after configuring resolvers.
 func NewConnection(id *identity.Identity, oraclePubKey [32]byte) *Connection {
 	pool := NewResolverPool(nil, 5)
-	pool.StartHealthCheck(60 * time.Second)
+	pool.Disabled = true           // OFF by default
+	pool.SingleResolver = "8.8.8.8"
 
 	return &Connection{
 		Identity:            id,
@@ -820,19 +823,32 @@ func (c *Connection) queryViaHTTP(frame []byte) ([]byte, error) {
 func (c *Connection) dnsQueryAAAA(name string) ([][]byte, error) {
 	query := buildDNSQuery(name)
 
-	maxAttempts := 3
-	if c.Pool != nil && c.Pool.HealthyCount() > 3 {
-		maxAttempts = c.Pool.HealthyCount()
+	// Determine resolver: use pool if LB enabled, otherwise use single Resolver
+	usePool := c.Pool != nil && !c.Pool.Disabled
+
+	maxAttempts := 1
+	if usePool {
+		healthy := c.Pool.HealthyCount()
+		if healthy > 3 {
+			maxAttempts = healthy
+		} else {
+			maxAttempts = 3
+		}
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		resolver := c.Resolver
-		if c.Pool != nil {
+		if usePool {
 			resolver = c.Pool.Next()
 		}
 
-		addr := resolver + ":53"
+		// Ensure resolver has port
+		if _, _, err := net.SplitHostPort(resolver); err != nil {
+			resolver = net.JoinHostPort(resolver, "53")
+		}
+
+		addr := resolver
 		conn, err := net.DialTimeout("udp", addr, 10*time.Second)
 		if err != nil {
 			lastErr = fmt.Errorf("DNS dial %s: %w", resolver, err)

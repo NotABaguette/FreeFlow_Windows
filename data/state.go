@@ -73,6 +73,7 @@ func DefaultSettings() Settings {
 		QueryDelay:          0.1,
 		ManualDelay:         0.1,
 		LoadBalanceStrength: 5,
+		DisableLB:           true,
 	}
 }
 
