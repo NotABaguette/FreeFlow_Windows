@@ -528,9 +528,9 @@ func (c *Connection) PollMessages(contacts *identity.ContactStore) (string, *ide
 		if err != nil {
 			return "", nil, fmt.Errorf("GET_MSG FETCH chunk %d: %w", chunkIdx, err)
 		}
-		if err := protocol.CheckErrorResponse(fetchResp); err != nil {
-			return "", nil, fmt.Errorf("GET_MSG FETCH chunk %d: %w", chunkIdx, err)
-		}
+		// NOTE: Do NOT call CheckErrorResponse on FETCH data.
+		// FETCH returns raw ciphertext bytes which can start with 0xFF
+		// by coincidence, causing false-positive error detection.
 
 		blob = append(blob, fetchResp...)
 		c.addQueryLog(c.transport(), fmt.Sprintf("GET_MSG FETCH chunk=%d", chunkIdx), fmt.Sprintf("got %dB", len(fetchResp)))
