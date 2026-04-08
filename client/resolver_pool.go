@@ -2,6 +2,7 @@ package client
 
 import (
 	"crypto/rand"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -41,6 +42,11 @@ type ResolverPool struct {
 	stopHealth chan struct{}
 	Disabled   bool            // if true, bypass pool and use SingleResolver
 	SingleResolver string     // resolver to use when Disabled=true
+	// ProbeDomain is the FreeFlow domain used for probing.
+	// Probes send an AAAA query for a subdomain of this domain through each
+	// resolver to test that the full path (resolver → Oracle) works and
+	// returns AAAA records. Set this to the Oracle's domain.
+	ProbeDomain string
 }
 
 // NewResolverPool creates a resolver pool. If resolvers is empty, the
@@ -207,9 +213,12 @@ func (p *ResolverPool) checkAll() {
 	log.Printf("[RESOLVER_POOL] Health check complete: %d/%d healthy", p.HealthyCount(), len(resolvers))
 }
 
-// probe tests resolver reachability by sending a minimal DNS query over UDP.
-// This conforms to the DNS protocol (no ICMP) and avoids spawning visible
-// CMD windows on Windows.
+// probe tests whether a resolver can return AAAA records for the FreeFlow
+// domain. Sends an AAAA query for a random subdomain through the resolver
+// to the Oracle. If the Oracle responds with AAAA records, the resolver works
+// for FreeFlow traffic. This tests the FULL path, not just "is resolver alive."
+//
+// If ProbeDomain is not set, falls back to a basic DNS A query for dns.google.
 func (p *ResolverPool) probe(resolver string) bool {
 	host := resolver
 	if h, _, err := net.SplitHostPort(resolver); err == nil {
@@ -218,41 +227,85 @@ func (p *ResolverPool) probe(resolver string) bool {
 	host = strings.TrimSpace(host)
 
 	addr := net.JoinHostPort(host, "53")
-	conn, err := net.DialTimeout("udp", addr, 3*time.Second)
+	conn, err := net.DialTimeout("udp", addr, 5*time.Second)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	query := buildDNSProbe()
+	p.mu.RLock()
+	domain := p.ProbeDomain
+	p.mu.RUnlock()
+
+	var query []byte
+	expectAAAA := false
+	if domain != "" {
+		query = buildAAAAProbe(domain)
+		expectAAAA = true
+	} else {
+		query = buildAProbe()
+	}
+
 	if _, err := conn.Write(query); err != nil {
 		return false
 	}
 
 	buf := make([]byte, 512)
 	n, err := conn.Read(buf)
-	return err == nil && n >= 12
+	if err != nil || n < 12 {
+		return false
+	}
+
+	if expectAAAA {
+		// Must have at least 1 AAAA answer — proves the full path works
+		answerCount := int(buf[6])<<8 | int(buf[7])
+		return answerCount > 0
+	}
+	return true
 }
 
-// buildDNSProbe builds a minimal DNS A query for "dns.google" to check
-// if a resolver is responding. Uses a random transaction ID.
-func buildDNSProbe() []byte {
+// buildAAAAProbe builds a DNS AAAA query for "probe-XXXX.domain" where XXXX
+// is random hex. Random subdomain ensures no caching and tests the Oracle path.
+func buildAAAAProbe(domain string) []byte {
 	var txid [2]byte
 	rand.Read(txid[:])
+	var rnd [4]byte
+	rand.Read(rnd[:])
+	subdomain := fmt.Sprintf("probe-%x", rnd)
 
 	var pkt []byte
 	pkt = append(pkt, txid[0], txid[1])
 	pkt = append(pkt, 0x01, 0x00) // flags: recursion desired
 	pkt = append(pkt, 0x00, 0x01) // questions: 1
 	pkt = append(pkt, 0, 0, 0, 0, 0, 0)
-	// dns.google
+
+	// Encode: subdomain.domain (e.g. probe-abcd1234.v.gamesoft-dl.fun)
+	for _, label := range strings.Split(subdomain+"."+domain, ".") {
+		pkt = append(pkt, byte(len(label)))
+		pkt = append(pkt, []byte(label)...)
+	}
+	pkt = append(pkt, 0)           // root
+	pkt = append(pkt, 0x00, 0x1C) // AAAA
+	pkt = append(pkt, 0x00, 0x01) // IN
+	return pkt
+}
+
+// buildAProbe builds a basic DNS A query for dns.google (fallback).
+func buildAProbe() []byte {
+	var txid [2]byte
+	rand.Read(txid[:])
+	var pkt []byte
+	pkt = append(pkt, txid[0], txid[1])
+	pkt = append(pkt, 0x01, 0x00)
+	pkt = append(pkt, 0x00, 0x01)
+	pkt = append(pkt, 0, 0, 0, 0, 0, 0)
 	pkt = append(pkt, 3)
 	pkt = append(pkt, []byte("dns")...)
 	pkt = append(pkt, 6)
 	pkt = append(pkt, []byte("google")...)
 	pkt = append(pkt, 0)
-	pkt = append(pkt, 0x00, 0x01) // A record
-	pkt = append(pkt, 0x00, 0x01) // IN class
+	pkt = append(pkt, 0x00, 0x01)
+	pkt = append(pkt, 0x00, 0x01)
 	return pkt
 }

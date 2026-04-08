@@ -70,6 +70,7 @@ func main() {
 	}
 
 	// Apply load balancing settings
+	conn.Pool.ProbeDomain = appData.Settings.OracleDomain // probe using FreeFlow AAAA queries
 	if appData.Settings.DisableLB {
 		conn.Pool.SetDisabled(true, appData.Settings.Resolver)
 	}
